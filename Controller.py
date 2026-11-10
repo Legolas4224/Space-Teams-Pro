@@ -108,6 +108,9 @@ Conventions used everywhere:
         item[1, 2]  diameter (m)                item[2, 0]  time of measurement (s since sim start)
 """
 
+
+from point_at_target import point_to_target 
+
 import numpy as np
 from collections import deque
 
@@ -182,7 +185,7 @@ class Tracker:
 # 2. AVOIDANCE - choose the velocity to fly
 # =====================================================================================
 
-def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=15.0):
+def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     """
     If we fly at my_velocity, how close do we get to the worst rock in the next `horizon` seconds,
     after subtracting its keep-out radius? Positive = safe, negative = collision course.
@@ -342,6 +345,9 @@ governor = BurnGovernor(gain=500000.0)
 iteration = 0
 imageNumber = 0
 exit_flag: bool = False
+
+
+
 while not exit_flag:
 
     ################################
@@ -385,28 +391,46 @@ while not exit_flag:
     targetVel: npt.NDArray = targetState.vel_WRT_ExprIn(phobosFrame)
 
     ##############################
-    # Calculate desired vecocity #
+    # Calculate desired velocity #
     ##############################
 
     goalDirection: npt.NDArray = (targetLoc - loc) / np.linalg.norm(targetLoc - loc)
-    goalSpeed_m_s: float = 17.0
+    goalSpeed_m_s: float = 8.0
     goalVelocity: npt.NDArray = goalSpeed_m_s * goalDirection
 
     ####################################################################
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(50), loc, t_from_start)
+    tracker.update(GetNearestDebrisLocations(100), loc, t_from_start)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)                # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
 
-    angularAcceleration_rad_s2 =  np.array([0,0,0]) # no rotation at the moment
+    if t_from_start < 100 :
+        angularAcceleration_rad_s2 = point_to_target(shuttle, phobosFrame, shuttleFrame, target)
+    else :
+        angularAcceleration_rad_s2 =  np.array([0,0,0]) # no rotation at the moment
     #accel= np.array([0,0,10000])
     SetCommand(accel, angularAcceleration_rad_s2) # forward desired accelerations to the sim shuttle
 
     st.OnScreenLogMessage(f"Current Velocity: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg", "Velocity", st.Severity.Info)
 
+    ## test for kieran
+    #if iteration == 10:
+    #    this = st.GetThisSystem()
+    #    phobos_test = this.GetParam(st.VarType.entityRef, "Phobos")
+    #    radius_test = phobos.GetParam(st.VarType.double, ["#Planet", "General", "Radius_m"])
+    #    mu_test = phobos.GetParam(st.VarType.double, ["Dynamics", "GravitationalParameter_km3_s2"]) * 1e9
+    #    debris_loc = GetNearestDebrisLocations(10)[0][0]
+    #    vert_offset = this.GetParam(st.VarType.double, "VerticalOffset_m")
+    #
+    #    #st.OnScreenLogMessage(f"radius: {radius_test}, mu: {mu_test}", st.Severity.Info)
+    #    
+    #    st.OnScreenLogMessage(f"Vert offset: {vert_offset}", st.Severity.Info)
+    #    time.sleep(20);
+
     iteration += 1
 
 st.leave_sim()
+
