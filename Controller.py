@@ -277,6 +277,7 @@ class BurnGovernor:
         self.start = start      # start burning when the error is bigger than this (m/s)
         self.stop = stop        # stop burning once the error is smaller than this (m/s)
         self.burning = False
+        
 
     def acceleration(self, wanted_velocity, current_velocity):
         error = np.asarray(wanted_velocity, float) - np.asarray(current_velocity, float)
@@ -299,7 +300,7 @@ class GoalPlanner:
     goal sphere, and only steers when the path drifts towards the edge. Less steering = less fuel.
     """
 
-    def __init__(self, cruise_speed, goal_radius=10.0, start_fraction=0.7, stop_fraction=0.3):
+    def __init__(self, cruise_speed, goal_radius=15.0, start_fraction=0.7, stop_fraction=0.3):
         self.cruise_speed = cruise_speed
         self.goal_radius = goal_radius
         self.start = start_fraction * goal_radius   # start steering if we would miss the centre by more than this
@@ -336,7 +337,8 @@ class GoalPlanner:
 
 tracker  = Tracker()             
 avoider  = Avoider()
-governor = BurnGovernor(gain=500000.0)
+governor = BurnGovernor(gain=50.0)
+planner = GoalPlanner(cruise_speed=8.0)
 
 ##################
 # Start the loop #
@@ -396,39 +398,22 @@ while not exit_flag:
 
     goalDirection: npt.NDArray = (targetLoc - loc) / np.linalg.norm(targetLoc - loc)
     goalSpeed_m_s: float = 8.0
-    goalVelocity: npt.NDArray = goalSpeed_m_s * goalDirection
+    goalVelocity = planner.wanted_velocity(loc, vel, targetLoc)
 
     ####################################################################
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(100), loc, t_from_start)
+    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)                # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
 
-    if t_from_start < 100 :
-        angularAcceleration_rad_s2 = point_to_target(shuttle, phobosFrame, shuttleFrame, target)
-    else :
-        angularAcceleration_rad_s2 =  np.array([0,0,0]) # no rotation at the moment
-    #accel= np.array([0,0,10000])
+    angularAcceleration_rad_s2 = np.array([0,0,0]) #point_to_target(shuttle, phobosFrame, shuttleFrame, target)
+
     SetCommand(accel, angularAcceleration_rad_s2) # forward desired accelerations to the sim shuttle
 
     st.OnScreenLogMessage(f"Current Velocity: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg", "Velocity", st.Severity.Info)
-
-    ## test for kieran
-    #if iteration == 10:
-    #    this = st.GetThisSystem()
-    #    phobos_test = this.GetParam(st.VarType.entityRef, "Phobos")
-    #    radius_test = phobos.GetParam(st.VarType.double, ["#Planet", "General", "Radius_m"])
-    #    mu_test = phobos.GetParam(st.VarType.double, ["Dynamics", "GravitationalParameter_km3_s2"]) * 1e9
-    #    debris_loc = GetNearestDebrisLocations(10)[0][0]
-    #    vert_offset = this.GetParam(st.VarType.double, "VerticalOffset_m")
-    #
-    #    #st.OnScreenLogMessage(f"radius: {radius_test}, mu: {mu_test}", st.Severity.Info)
-    #    
-    #    st.OnScreenLogMessage(f"Vert offset: {vert_offset}", st.Severity.Info)
-    #    time.sleep(20);
 
     iteration += 1
 
