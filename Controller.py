@@ -265,6 +265,11 @@ class Avoider:
 
         # 5. Nothing is fully safe: take the least-bad option we looked at.
         self.last_dodge = max(tried, key=score)
+
+        # Report Changes
+        st.OnScreenLogMessage(f"Dodge info: {self.last_dodge}", st.Severity.Info)
+
+    
         return self.last_dodge
 
 # =====================================================================================
@@ -347,8 +352,6 @@ planner = GoalPlanner(cruise_speed=8.0)
 iteration = 0
 imageNumber = 0
 exit_flag: bool = False
-
-
 
 while not exit_flag:
 
