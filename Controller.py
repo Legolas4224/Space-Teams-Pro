@@ -267,7 +267,7 @@ class Avoider:
         self.last_dodge = max(tried, key=score)
 
         # Report Changes
-        st.OnScreenLogMessage(f"Dodge info: {self.last_dodge}", st.Severity.Info)
+        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}", st.Severity.Info)
 
     
         return self.last_dodge
