@@ -144,7 +144,7 @@ class Tracker:
 # 2. AVOIDANCE - choose the velocity to fly
 # =====================================================================================
 
-def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=15.0):
+def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     """
     If we fly at my_velocity, how close do we get to the worst rock in the next `horizon` seconds,
     after subtracting its keep-out radius? Positive = safe, negative = collision course.
@@ -204,7 +204,7 @@ class GoalPlanner:
 
 tracker  = Tracker()             
 avoider  = Avoider()
-governor = BurnGovernor(gain=500000.0)
+governor = BurnGovernor(gain=5.0)
 
 ##################
 # Start the loop #
@@ -260,14 +260,14 @@ while not exit_flag:
     ##############################
 
     goalDirection: npt.NDArray = (targetLoc - loc) / np.linalg.norm(targetLoc - loc)
-    goalSpeed_m_s: float = 17.0
+    goalSpeed_m_s: float = 8.0
     goalVelocity: npt.NDArray = goalSpeed_m_s * goalDirection
 
     ####################################################################
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(50), loc, t_from_start)
+    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)                # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
