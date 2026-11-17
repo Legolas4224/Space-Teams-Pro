@@ -117,66 +117,28 @@ from collections import deque
 
 class Rock:
     def __init__(self, position, diameter, time):
-        self.position = position          # latest ABSOLUTE position
-        self.diameter = diameter
-        self.velocity = None              # unknown until we have watched it for a while
-        self.last_seen = time
-        self.history = deque(maxlen=30)   # recent (time, position) samples; capped so memory can't grow
-        self.history.append((time, position))
+        pass
 
     def add_sighting(self, position, diameter, time):
-        if time <= self.last_seen:        # the radar repeated an old reading: ignore it
-            return
-        self.position = position
-        self.diameter = 0.8 * self.diameter + 0.2 * diameter     # smooth the noisy diameter
-        self.last_seen = time
-        self.history.append((time, position))
-        self.update_velocity()
+        pass
 
     def update_velocity(self):
-        times = np.array([t for t, p in self.history])
-        points = np.array([p for t, p in self.history])
-        if len(times) < 3 or times[-1] - times[0] < 1.0:
-            return                        # too little data: a velocity now would be mostly noise
-        # Fit a straight line through the positions. Its slope (per axis) is the velocity.
-        self.velocity = np.polyfit(times - times[0], points, 1)[0]
+        pass
 
     def predicted_position(self, time):
-        if self.velocity is None:
-            return self.position
-        return self.position + self.velocity * (time - self.last_seen)
+        pass
 
 
 class Tracker:
     def __init__(self, gate=15.0, max_age=5.0):
-        self.rocks = []
-        self.gate = gate          # sightings closer than this (m) count as the same rock
-        self.max_age = max_age    # forget rocks not seen for this long (s)
+        pass
 
     def update(self, radar_items, shuttle_position, now):
-        for item in radar_items:
-            # The radar gives positions relative to the shuttle. Add the shuttle's own
-            # position so that all sightings share one fixed frame.
-            position = shuttle_position + item[0, :]
-            diameter, time = item[1, 2], item[2, 0]
-            rock = self.find_match(position, diameter, time)
-            if rock is None:
-                self.rocks.append(Rock(position, diameter, time))    # new rock
-            else:
-                rock.add_sighting(position, diameter, time)
-        self.rocks = [r for r in self.rocks if now - r.last_seen < self.max_age]
+        pass
 
     def find_match(self, position, diameter, time):
         """The closest existing rock that is a similar size and within the gate, else None."""
-        best, best_distance = None, self.gate
-        for rock in self.rocks:
-            if abs(rock.diameter - diameter) > 0.25 * rock.diameter:
-                continue                                              # sizes too different
-            distance = np.linalg.norm(rock.predicted_position(time) - position)
-            if distance < best_distance:
-                best, best_distance = rock, distance
-        return best
-
+        pass
 
 # =====================================================================================
 # 2. AVOIDANCE - choose the velocity to fly
@@ -190,79 +152,19 @@ def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=15.0):
       rock_vel (n,3)  how fast each rock is moving
       keep_out (n,)   radius we want to stay outside (rock radius + safety margin)
     """
-    rel_vel = rock_vel - my_velocity                       # how each rock moves as seen from us
-    speed_squared = (rel_vel ** 2).sum(axis=1) + 1e-9
-    # time when the rock is closest to us (from minimising |rel_pos + t * rel_vel|)
-    t = -(rel_pos * rel_vel).sum(axis=1) / speed_squared
-    t = np.clip(t, 0.0, horizon)                           # only look from now until the horizon
-    closest = np.linalg.norm(rel_pos + t[:, None] * rel_vel, axis=1)
-    return (closest - keep_out).min()
-
+    pass
 
 def two_sideways_directions(direction):
     """Two unit vectors that are perpendicular to `direction` and to each other."""
-    helper = np.array([0.0, 0.0, 1.0]) if abs(direction[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    side1 = np.cross(direction, helper)
-    side1 /= np.linalg.norm(side1)
-    side2 = np.cross(direction, side1)
-    return side1, side2
-
+    pass
 
 class Avoider:
     def __init__(self, margin=6.0, unknown_extra=4.0, horizon=50.0):
-        self.margin = margin                # metres of clearance beyond each rock's surface
-        self.unknown_extra = unknown_extra  # extra margin for rocks whose velocity we don't know yet
-        self.horizon = horizon
-        self.last_dodge = None              # remembered so we don't flip-flop between dodges
+        pass
 
     def choose(self, wanted_velocity, rocks, shuttle_position, now):
         """Return the velocity to fly: the wanted one if it is safe, else the smallest safe change."""
-        wanted_velocity = np.asarray(wanted_velocity, float)
-        speed = np.linalg.norm(wanted_velocity)
-        if speed < 1e-3 or len(rocks) == 0:
-            return wanted_velocity
-
-        # Describe every rock as plain arrays.
-        rel_pos = np.array([r.predicted_position(now) - shuttle_position for r in rocks])
-        rock_vel = np.array([r.velocity if r.velocity is not None else np.zeros(3) for r in rocks])
-        keep_out = np.array([r.diameter / 2 + self.margin
-                             + (self.unknown_extra if r.velocity is None else 0.0) for r in rocks])
-
-        def score(velocity):
-            return clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
-
-        # 1. Nothing in the way? Fly exactly as wanted (no thruster use at all).
-        if score(wanted_velocity) > 0:
-            self.last_dodge = None
-            return wanted_velocity
-
-        # 2. Still dodging? Keep the same dodge while it still works (stops flip-flopping).
-        if self.last_dodge is not None and score(self.last_dodge) > 0:
-            return self.last_dodge
-
-        # 3. Try sideways dodges, SMALLEST first: a small velocity change costs the least fuel.
-        side1, side2 = two_sideways_directions(wanted_velocity / speed)
-        tried = [wanted_velocity]
-        for size in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75):         # as a fraction of our speed
-            for angle in np.linspace(0, 2 * np.pi, 8, endpoint=False):
-                sideways = np.cos(angle) * side1 + np.sin(angle) * side2
-                candidate = wanted_velocity + size * speed * sideways
-                if score(candidate) > 0:
-                    self.last_dodge = candidate
-                    return candidate
-                tried.append(candidate)
-
-        # 4. No sideways dodge works: try slowing down.
-        for fraction in (0.5, 0.25, 0.0):
-            candidate = wanted_velocity * fraction
-            if score(candidate) > 0:
-                self.last_dodge = candidate
-                return candidate
-            tried.append(candidate)
-
-        # 5. Nothing is fully safe: take the least-bad option we looked at.
-        self.last_dodge = max(tried, key=score)
-        return self.last_dodge
+        pass
 
 # =====================================================================================
 # 3. FUEL - only fire the thrusters when the velocity error is worth a burn
@@ -270,20 +172,10 @@ class Avoider:
 
 class BurnGovernor:
     def __init__(self, gain=5.0, start=0.3, stop=0.1):
-        self.gain = gain        # acceleration (m/s^2) per m/s of velocity error
-        self.start = start      # start burning when the error is bigger than this (m/s)
-        self.stop = stop        # stop burning once the error is smaller than this (m/s)
-        self.burning = False
+        pass
 
     def acceleration(self, wanted_velocity, current_velocity):
-        error = np.asarray(wanted_velocity, float) - np.asarray(current_velocity, float)
-        size = np.linalg.norm(error)
-        if self.burning and size < self.stop:
-            self.burning = False
-        elif not self.burning and size > self.start:
-            self.burning = True
-        return self.gain * error if self.burning else np.zeros(3)
-
+        pass
 
 # =====================================================================================
 # 4. GOAL - the target is a SPHERE, so we only steer when our path would miss it
@@ -297,35 +189,14 @@ class GoalPlanner:
     """
 
     def __init__(self, cruise_speed, goal_radius=10.0, start_fraction=0.7, stop_fraction=0.3):
-        self.cruise_speed = cruise_speed
-        self.goal_radius = goal_radius
-        self.start = start_fraction * goal_radius   # start steering if we would miss the centre by more than this
-        self.stop = stop_fraction * goal_radius     # ...and keep steering until the miss is under this
-        self.correcting = True
-
+        pass
+        
     def miss_distance(self, shuttle_position, shuttle_velocity, target_position):
         """How far from the target centre we would pass if we kept our current velocity."""
-        speed = np.linalg.norm(shuttle_velocity)
-        if speed < 0.98 * self.cruise_speed:
-            return np.inf                                   # not at cruise speed yet: keep accelerating
-        heading = shuttle_velocity / speed
-        to_target = target_position - shuttle_position
-        along = to_target @ heading                         # how far ahead the target is along our heading
-        if along <= 0:
-            return np.inf                                   # we are moving away from it
-        return np.linalg.norm(to_target - along * heading)  # sideways distance at closest approach
+        pass
 
     def wanted_velocity(self, shuttle_position, shuttle_velocity, target_position):
-        miss = self.miss_distance(shuttle_position, shuttle_velocity, target_position)
-        if self.correcting and miss < self.stop:
-            self.correcting = False                         # on a good path: coast
-        elif not self.correcting and miss > self.start:
-            self.correcting = True                          # drifting off: steer again
-        if not self.correcting:
-            return np.asarray(shuttle_velocity, float)      # wanting what we have = no thruster use
-        to_target = target_position - shuttle_position
-        return self.cruise_speed * to_target / np.linalg.norm(to_target)
-
+        pass
 
 ####################################
 #        Main Code Start           # 
