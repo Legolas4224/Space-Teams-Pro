@@ -175,18 +175,15 @@ class Tracker:
         self.max_age = max_age  # forget rocks not seen for this long (s)
 
     def update(self, radar_items, shuttle_position, now, target_position):
+
         target_vec = target_position - shuttle_position
-        target_dist = np.linalg.norm(target_vec)
-        CONE_COS = np.cos(np.radians(90.0))
+        CONE_ANGLE: float = np.radians(45.0)
 
-        def debris_in_cone(rel_pos) -> bool:
-            # rel_pos is already relative to the shuttle
-            d = np.linalg.norm(rel_pos)
-            if d < 1e-9 or target_dist < 1e-9:
-                return True  # degenerate case: keep it, safer than dropping it
-            return (rel_pos @ target_vec) / (d * target_dist) > CONE_COS
-
-
+        def debris_in_cone(debris_pos) -> bool:
+            debris_vec = debris_pos - shuttle_position
+            dot = np.dot(debris_vec, target_vec)
+            ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
+            return dot > 0.0 and ang < CONE_ANGLE
 
         radar_items = [r for r in radar_items if debris_in_cone(r[0])]
 
@@ -201,7 +198,6 @@ class Tracker:
             else:
                 rock.add_sighting(position, diameter, time)
         self.rocks = [r for r in self.rocks if now - r.last_seen < self.max_age]
-        #st.OnScreenLogMessage(f"Rock info: {str(len(self.rocks))}","Rocks", st.Severity.Info)
 
     def find_match(self, position, diameter, time):
         """The closest existing rock that is a similar size and within the gate, else None."""
@@ -234,7 +230,6 @@ def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     t = -(rel_pos * rel_vel).sum(axis=1) / speed_squared
     t = np.clip(t, 0.0, horizon)  # only look from now until the horizon
     closest = np.linalg.norm(rel_pos + t[:, None] * rel_vel, axis=1)
-    st.OnScreenLogMessage(f"Closest Approach: {(closest - keep_out).min()}m","dodge", st.Severity.Info)
     return (closest - keep_out).min()
 
 
@@ -248,7 +243,7 @@ def two_sideways_directions(direction):
 
 
 class Avoider:
-    def __init__(self, margin=4.0, unknown_extra=4.0, horizon=20.0):
+    def __init__(self, margin=6.0, unknown_extra=4.0, horizon=50.0):
         self.margin = margin  # metres of clearance beyond each rock's surface
         self.unknown_extra = (
             unknown_extra  # extra margin for rocks whose velocity we don't know yet
@@ -309,7 +304,7 @@ class Avoider:
         self.last_dodge = max(tried, key=score)
 
         # Report Changes
-        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}","dodge", st.Severity.Info)
+        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}", st.Severity.Info)
 
         return self.last_dodge
 
@@ -360,10 +355,8 @@ class GoalPlanner:
     def miss_distance(self, shuttle_position, shuttle_velocity, target_position):
         """How far from the target centre we would pass if we kept our current velocity."""
         speed = np.linalg.norm(shuttle_velocity)
-        st.OnScreenLogMessage(f"Distance from target: {(np.linalg.norm(target_position - shuttle_position))}m", "Velocity", st.Severity.Info)
-        if (speed < 0.95 * self.cruise_speed) and (np.linalg.norm(target_position) - np.linalg.norm(shuttle_position)) > 1100.0 and fuelUsed < 35.0:
+        if speed < 0.98 * self.cruise_speed and (np.linalg.norm(target_position) - np.linalg.norm(shuttle_position)) > 1000.0:
             return np.inf  # not at cruise speed yet: keep accelerating
-        
         heading = shuttle_velocity / speed
         to_target = target_position - shuttle_position
         along = to_target @ heading  # how far ahead the target is along our heading
@@ -389,8 +382,8 @@ class GoalPlanner:
 
 tracker = Tracker()
 avoider = Avoider()
-governor = BurnGovernor(gain=5.0)
-planner = GoalPlanner(cruise_speed=6.0)
+governor = BurnGovernor(gain=50.0)
+planner = GoalPlanner(cruise_speed=8.0)
 
 ##################
 # Start the loop #
@@ -457,24 +450,20 @@ while not exit_flag:
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)  # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
-    #st.OnScreenLogMessage(f"Debris info: {tracker.rocks}","tracks", st.Severity.Info)
 
     angularAcceleration_rad_s2 = np.array(
         [0, 0, 0]
-    ) 
+    )  # point_to_target(shuttle, phobosFrame, shuttleFrame, target)
 
     SetCommand(
         accel, angularAcceleration_rad_s2
     )  # forward desired accelerations to the sim shuttle
 
     st.OnScreenLogMessage(
-        f"Current Speed: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg",
+        f"Current Velocity: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg",
         "Velocity",
         st.Severity.Info,
     )
-
-    
-            
 
     iteration += 1
 
