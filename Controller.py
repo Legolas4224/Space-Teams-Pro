@@ -169,80 +169,39 @@ class Rock:
 
 
 class Tracker:
-    def __init__(self, gate=5.0, max_age=5.0):
+    def __init__(self, gate=15.0, max_age=5.0):
         self.rocks = []
         self.gate = gate  # sightings closer than this (m) count as the same rock
         self.max_age = max_age  # forget rocks not seen for this long (s)
 
     def update(self, radar_items, shuttle_position, now, target_position):
-        TRACKER_DEBUG = True
-
-        CONE_ANGLE: float = np.radians(50.0)
-        CORE_BUBBLE: float = 50 # (m)
         target_vec = target_position - shuttle_position
+        target_dist = np.linalg.norm(target_vec)
+        CONE_COS = np.cos(np.radians(90.0))
 
-        ROCKS_FROM_RADAR = len(radar_items)
-        ETC = f"tv: {target_vec}\n"
-        if TRACKER_DEBUG:
-            for r in radar_items:
-                debris_pos = r[0]
-                dot = np.dot(target_vec, debris_pos)
-                ang = np.acos(dot / (np.linalg.norm(target_vec) * np.linalg.norm(debris_pos)))
-                ETC += f"({debris_pos}, {dot}, {np.degrees(ang)})\n"
-
-        def debris_in_cone(debris) -> bool:
-            # debris_pos already relative
-            debris_pos = debris[0]
-            if debris[1][0] < CORE_BUBBLE:
-                return True
-            dot = np.dot(target_vec, debris_pos)
-            ang = np.acos(dot / (np.linalg.norm(target_vec) * np.linalg.norm(debris_pos)))
-            return dot > 0.0 and ang < CONE_ANGLE
-
-        radar_items = [r for r in radar_items if debris_in_cone(r)]
-        ROCKS_IN_FRUSTUM = len(radar_items)
-
-        #for item in radar_items:
-        #    # The radar gives positions relative to the shuttle. Add the shuttle's own
-        #    # position so that all sightings share one fixed frame.
-        #    position = shuttle_position + item[0, :]
-        #    diameter, time = item[1, 2], item[2, 0]
-        #    rock = self.find_match(position, diameter, time)
-        #    if rock is None:
-        #        self.rocks.append(Rock(position, diameter, time))  # new rock
-        #    else:
-        #        rock.add_sighting(position, diameter, time)
-
-        # replace the "for item in radar_items" loop with:
-        sightings = [(shuttle_position + item[0, :], item[1, 2], item[2, 0])
-                    for item in radar_items]
-
-        pairs = []
-        for i, (pos, d, t) in enumerate(sightings):
-            for j, rock in enumerate(self.rocks):
-                if abs(rock.diameter - d) > 0.25 * rock.diameter:
-                    continue
-                dist = np.linalg.norm(rock.predicted_position(t) - pos)
-                if dist < self.gate:
-                    pairs.append((dist, i, j))
-
-        pairs.sort(key=lambda p: p[0])          # globally closest first, order-independent
-        used_s, used_r = set(), set()
-        for dist, i, j in pairs:
-            if i in used_s or j in used_r:
-                continue
-            self.rocks[j].add_sighting(*sightings[i])
-            used_s.add(i)
-            used_r.add(j)
-
-        for i, s in enumerate(sightings):       # new rocks only after matching is done
-            if i not in used_s:
-                self.rocks.append(Rock(*s))
+        def debris_in_cone(rel_pos) -> bool:
+            # rel_pos is already relative to the shuttle
+            d = np.linalg.norm(rel_pos)
+            if d < 1e-9 or target_dist < 1e-9:
+                return True  # degenerate case: keep it, safer than dropping it
+            return (rel_pos @ target_vec) / (d * target_dist) > CONE_COS
 
 
+
+        radar_items = [r for r in radar_items if debris_in_cone(r[0])]
+
+        for item in radar_items:
+            # The radar gives positions relative to the shuttle. Add the shuttle's own
+            # position so that all sightings share one fixed frame.
+            position = shuttle_position + item[0, :]
+            diameter, time = item[1, 2], item[2, 0]
+            rock = self.find_match(position, diameter, time)
+            if rock is None:
+                self.rocks.append(Rock(position, diameter, time))  # new rock
+            else:
+                rock.add_sighting(position, diameter, time)
         self.rocks = [r for r in self.rocks if now - r.last_seen < self.max_age]
-        if TRACKER_DEBUG:
-            return (ROCKS_FROM_RADAR, ROCKS_IN_FRUSTUM, ETC)
+        #st.OnScreenLogMessage(f"Rock info: {str(len(self.rocks))}","Rocks", st.Severity.Info)
 
     def find_match(self, position, diameter, time):
         """The closest existing rock that is a similar size and within the gate, else None."""
@@ -275,8 +234,8 @@ def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     t = -(rel_pos * rel_vel).sum(axis=1) / speed_squared
     t = np.clip(t, 0.0, horizon)  # only look from now until the horizon
     closest = np.linalg.norm(rel_pos + t[:, None] * rel_vel, axis=1)
-    # return (closest - keep_out).min()
-    return np.all((closest-keep_out) > 0)
+    st.OnScreenLogMessage(f"Closest Approach: {(closest - keep_out).min()}m","dodge", st.Severity.Info)
+    return (closest - keep_out).min()
 
 
 def two_sideways_directions(direction):
@@ -289,25 +248,19 @@ def two_sideways_directions(direction):
 
 
 class Avoider:
-    def __init__(self, margin=6.0, unknown_extra=4.0, horizon=50.0):
+    def __init__(self, margin=4.0, unknown_extra=4.0, horizon=20.0):
         self.margin = margin  # metres of clearance beyond each rock's surface
         self.unknown_extra = (
             unknown_extra  # extra margin for rocks whose velocity we don't know yet
         )
         self.horizon = horizon
         self.last_dodge = None  # remembered so we don't flip-flop between dodges
-        self.dodge_counter = None
 
     def choose(self, wanted_velocity, rocks, shuttle_position, now):
         """Return the velocity to fly: the wanted one if it is safe, else the smallest safe change."""
-        def dodge_msg(msg) -> None:
-            
-            st.OnScreenLogMessage(f"Dodge info: {msg}", "Dodge", st.Severity.Info)
-
         wanted_velocity = np.asarray(wanted_velocity, float)
         speed = np.linalg.norm(wanted_velocity)
         if speed < 1e-3 or len(rocks) == 0:
-            dodge_msg("no_dodge (no rocks)")
             return wanted_velocity
 
         # Describe every rock as plain arrays.
@@ -321,25 +274,15 @@ class Avoider:
         )
 
         def score(velocity):
-            # this now returns whether there will be:
-            #   a collision with any rock, at this velocity
-            s = clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
-            return 1 if s else 0
+            return clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
 
         # 1. Nothing in the way? Fly exactly as wanted (no thruster use at all).
         if score(wanted_velocity) > 0:
-            if self.dodge_counter > 0:
-                self.dodge_counter -= 1
-                return self.last_dodge
-            else:
-                self.last_dodge = None
-                dodge_msg(f"nothing in way, req_vel:{wanted_velocity}")
-                return wanted_velocity
+            self.last_dodge = None
+            return wanted_velocity
 
         # 2. Still dodging? Keep the same dodge while it still works (stops flip-flopping).
         if self.last_dodge is not None and score(self.last_dodge) > 0:
-            dodge_msg(f"still dodging last: {str(self.last_dodge)}")
-            self.dodge_counter = 20
             return self.last_dodge
 
         # 3. Try sideways dodges, SMALLEST first: a small velocity change costs the least fuel.
@@ -351,8 +294,6 @@ class Avoider:
                 candidate = wanted_velocity + size * speed * sideways
                 if score(candidate) > 0:
                     self.last_dodge = candidate
-                    dodge_msg(f"sideways dodge: {str(candidate)}")
-                    self.dodge_counter = 20
                     return candidate
                 tried.append(candidate)
 
@@ -361,27 +302,14 @@ class Avoider:
             candidate = wanted_velocity * fraction
             if score(candidate) > 0:
                 self.last_dodge = candidate
-                dodge_msg(f"trying to slow down: {str(self.last_dodge)}")
-                self.dodge_counter = 20
-                return candidate
-            tried.append(candidate)
-
-        # 4.5. Try speeding up!
-        for fraction in (1.15, 1.25, 1.5):
-            candidate = wanted_velocity * fraction
-            if score(candidate) > 0:
-                self.last_dodge = candidate
-                dodge_msg(f"trying to speed up: {str(self.last_dodge)}")
-                self.dodge_counter = 20
                 return candidate
             tried.append(candidate)
 
         # 5. Nothing is fully safe: take the least-bad option we looked at.
         self.last_dodge = max(tried, key=score)
-        self.dodge_counter = 20
 
         # Report Changes
-        dodge_msg(f"nothing fully safe! : {str(self.last_dodge)}")
+        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}","dodge", st.Severity.Info)
 
         return self.last_dodge
 
@@ -432,8 +360,10 @@ class GoalPlanner:
     def miss_distance(self, shuttle_position, shuttle_velocity, target_position):
         """How far from the target centre we would pass if we kept our current velocity."""
         speed = np.linalg.norm(shuttle_velocity)
-        if speed < 0.98 * self.cruise_speed:
+        st.OnScreenLogMessage(f"Distance from target: {(np.linalg.norm(target_position - shuttle_position))}m", "Velocity", st.Severity.Info)
+        if (speed < 0.95 * self.cruise_speed) and (np.linalg.norm(target_position) - np.linalg.norm(shuttle_position)) > 1100.0 and fuelUsed < 35.0:
             return np.inf  # not at cruise speed yet: keep accelerating
+        
         heading = shuttle_velocity / speed
         to_target = target_position - shuttle_position
         along = to_target @ heading  # how far ahead the target is along our heading
@@ -453,101 +383,14 @@ class GoalPlanner:
         return self.cruise_speed * to_target / np.linalg.norm(to_target)
 
 
-def point_at_target(): 
-    # points the x axis of the shuttle towards the target. 
-    # This is basically just the code from the original beeline example, but with an added d term to avoid overshoot
-    import copy
-    # Gains
-    angvel_gain: float = 0.2
-    kp_pitch = 2.0
-    kp_yaw = 2.0
-    kp_roll = 2.0
-    
-    kd_pitch = 5.0
-    kd_yaw = 5.0
-    kd_roll = 5.0
-
-    # Translational control
-    targetState: st.frames.FramedLocVelAcc = target.getLocVelAcc()
-    targetLoc: npt.NDArray = targetState.loc_WRT_ExprIn(phobosFrame)
-    targetVel: npt.NDArray = targetState.vel_WRT_ExprIn(phobosFrame)
-
-    goalDirection: npt.NDArray = (targetLoc - loc) / np.linalg.norm(targetLoc - loc)
-
-    ## Rotational control
-    ## Align shuttle x-axis to target and shuttle y-axis to Phobos y-axis
-    #x_hat = copy.deepcopy(goalDirection)
-    #y_hat = np.array([0.0, -1.0, 0.0])
-    #z_hat = np.cross(x_hat, y_hat)
-    #z_hat = z_hat / np.linalg.norm(z_hat)
-    #T_shuttlePhobos = np.vstack((x_hat, y_hat, z_hat))
-    #q_shuttlePhobos = st.math.DCM_to_Quat(T_shuttlePhobos)
-
-    # Rotational control
-    # Align shuttle z-axis to target and keep shuttle y-axis as close as possible to Phobos -y
-    z_hat = copy.deepcopy(goalDirection)
-    up_ref = np.array([0.0, -1.0, 0.0])
-
-    x_hat = np.cross(up_ref, z_hat)            # y × z = x (right-handed)
-    x_norm = np.linalg.norm(x_hat)
-    if x_norm < 1e-6:                          # target is along the reference axis, so pick any perpendicular
-        x_hat = np.cross(np.array([1.0, 0.0, 0.0]), z_hat)
-        x_norm = np.linalg.norm(x_hat)
-    x_hat = x_hat / x_norm
-    y_hat = np.cross(z_hat, x_hat)             # z × x = y, exactly perpendicular to both
-
-    T_shuttlePhobos = np.vstack((x_hat, y_hat, z_hat))
-    q_shuttlePhobos = st.math.DCM_to_Quat(T_shuttlePhobos)
-
-    desired_AngVel = np.zeros(3)
-    if angvel_gain != 0.0:
-        desired_AngVel = AngVelFromQuats(rot, q_shuttlePhobos, 1.0 / angvel_gain)
-    desired_AngVel = st.frames.FramedAngVel(desired_AngVel, phobosFrame).WRT(phobosFrame).ExprIn(shuttleFrame)
-
-    desired_AngVel_x = desired_AngVel[0]
-    desired_AngVel_y = desired_AngVel[1]
-    desired_AngVel_z = desired_AngVel[2]
-
-    # get current angular velocity values
-    current_AngVel = shuttle.getAngVelocity().WRT(phobosFrame).ExprIn(shuttleFrame)
-    current_AngVel_x: float = current_AngVel[0]
-    current_AngVel_y: float = current_AngVel[1]
-    current_AngVel_z: float = current_AngVel[2]
-
-    # calculate angular velocity error
-    AngVel_error_x = desired_AngVel_x - current_AngVel_x
-    AngVel_error_y = desired_AngVel_y - current_AngVel_y
-    AngVel_error_z = desired_AngVel_z - current_AngVel_z
-
-    # Clamp to avoid excessive burns
-    if abs(AngVel_error_x) < 0.02 :
-        AngVel_error_x = 0
-    if abs(AngVel_error_y) < 0.02 :
-        AngVel_error_y = 0
-    if abs(AngVel_error_z) < 0.02 :
-        AngVel_error_z = 0
-
-    st.OnScreenLogMessage(f"AngVel_error_x = {AngVel_error_x}, AngVel_error_y = {AngVel_error_y}, AngVel_error_z = {AngVel_error_z}", "Attitude", st.Severity.Info,)
-    
-
-    strength_torque = shuttle.GetParam(st.VarType.double, ["Thrusters", "TorqueStrength_Nm"])
-    torque_x = (kp_roll * AngVel_error_x - kd_roll * current_AngVel_x) * strength_torque 
-    torque_y = (kp_pitch * AngVel_error_y - kd_pitch * current_AngVel_y) * strength_torque
-    torque_z = (kp_yaw * AngVel_error_z * - kd_yaw * current_AngVel_z) * strength_torque
-
-    torque_Nm = np.array([torque_x, torque_y, torque_z])
-    angularAcceleration_rad_s2 = np.linalg.inv(shuttle.getInertiaTensor(shuttleFrame)) @ torque_Nm
-    return angularAcceleration_rad_s2
-
-
 ####################################
 #        Main Code Start           #
 ####################################
 
 tracker = Tracker()
 avoider = Avoider()
-governor = BurnGovernor(gain=50.0)
-planner = GoalPlanner(cruise_speed=8.0)
+governor = BurnGovernor(gain=5.0)
+planner = GoalPlanner(cruise_speed=6.0)
 
 ##################
 # Start the loop #
@@ -610,15 +453,15 @@ while not exit_flag:
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(500), loc, t_from_start, targetLoc)
+    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start, targetLoc)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)  # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
+    #st.OnScreenLogMessage(f"Debris info: {tracker.rocks}","tracks", st.Severity.Info)
 
     angularAcceleration_rad_s2 = np.array(
         [0, 0, 0]
-    )  #point_to_target(shuttle, phobosFrame, shuttleFrame, target)
-    angularAcceleration_rad_s2 = point_at_target()
+    ) 
 
     SetCommand(
         accel, angularAcceleration_rad_s2
@@ -629,6 +472,9 @@ while not exit_flag:
         "Velocity",
         st.Severity.Info,
     )
+
+    
+            
 
     iteration += 1
 
